@@ -1,7 +1,15 @@
-import type { Conversation, Message } from "../types/chat";
+import type { Conversation, ImageAspectRatio, Message } from "../types/chat";
 
 const CONVERSATIONS_STORAGE_KEY = "gemini_chat_conversations_v1";
 const ACTIVE_ID_STORAGE_KEY = "gemini_chat_active_id_v1";
+
+const VALID_ASPECT_RATIOS = new Set<ImageAspectRatio>([
+  "1:1",
+  "16:9",
+  "9:16",
+  "4:3",
+  "3:4",
+]);
 
 export function generateId(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
@@ -31,14 +39,30 @@ export function deriveTitleFromMessage(text: string): string {
   return (lastSpace > 18 ? sliced.slice(0, lastSpace) : sliced) + "...";
 }
 
+function isSafeImageDataUrl(value: unknown): value is string {
+  return typeof value === "string" && value.startsWith("data:image/");
+}
+
 function isValidMessage(value: unknown): value is Message {
   if (!value || typeof value !== "object") return false;
   const msg = value as Record<string, unknown>;
+  const hasValidMode =
+    msg.mode === undefined || msg.mode === "chat" || msg.mode === "image";
+  const hasValidImage =
+    msg.imageUrl === undefined || isSafeImageDataUrl(msg.imageUrl);
+  const hasValidRatio =
+    msg.imageAspectRatio === undefined ||
+    (typeof msg.imageAspectRatio === "string" &&
+      VALID_ASPECT_RATIOS.has(msg.imageAspectRatio as ImageAspectRatio));
+
   return (
     typeof msg.id === "string" &&
     (msg.role === "user" || msg.role === "model") &&
     typeof msg.text === "string" &&
-    typeof msg.createdAt === "number"
+    typeof msg.createdAt === "number" &&
+    hasValidMode &&
+    hasValidImage &&
+    hasValidRatio
   );
 }
 
@@ -76,7 +100,43 @@ export function saveConversations(conversations: Conversation[]): void {
       JSON.stringify(conversations)
     );
   } catch {
-    // Ignore storage quota errors gracefully
+    // If large base64 images exceed localStorage quota, prune oldest images first
+    try {
+      const cloned: Conversation[] = conversations.map((conv) => ({
+        ...conv,
+        messages: conv.messages.map((m) => ({ ...m })),
+      }));
+
+      const imageLocations: Array<{
+        convIdx: number;
+        msgIdx: number;
+        createdAt: number;
+      }> = [];
+      cloned.forEach((conv, convIdx) => {
+        conv.messages.forEach((msg, msgIdx) => {
+          if (msg.imageUrl) {
+            imageLocations.push({ convIdx, msgIdx, createdAt: msg.createdAt });
+          }
+        });
+      });
+
+      imageLocations.sort((a, b) => a.createdAt - b.createdAt);
+
+      for (const loc of imageLocations) {
+        delete cloned[loc.convIdx].messages[loc.msgIdx].imageUrl;
+        try {
+          localStorage.setItem(
+            CONVERSATIONS_STORAGE_KEY,
+            JSON.stringify(cloned)
+          );
+          return;
+        } catch {
+          // Keep pruning older images until it fits
+        }
+      }
+    } catch {
+      // Ignore storage errors gracefully
+    }
   }
 }
 

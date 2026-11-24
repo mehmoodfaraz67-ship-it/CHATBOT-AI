@@ -1,6 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AlertCircle, ArrowDown, Check, Copy, RotateCcw } from "lucide-react";
-import type { Message } from "../types/chat";
+import {
+  AlertCircle,
+  ArrowDown,
+  Check,
+  Copy,
+  Download,
+  Image as ImageIcon,
+  RotateCcw,
+} from "lucide-react";
+import type { ChatMode, Message } from "../types/chat";
 import { formatTimestamp } from "../utils/format";
 import { MessageContent } from "./MessageContent";
 
@@ -8,28 +16,38 @@ interface MessageListProps {
   conversationId: string | null;
   messages: Message[];
   isLoading: boolean;
+  loadingMode: ChatMode;
   error: string | null;
   onRetry: () => void;
   onDismissError: () => void;
-  onSelectPrompt: (prompt: string) => void;
+  onSelectPrompt: (prompt: string, mode?: ChatMode) => void;
 }
 
-const STARTER_PROMPTS = [
+const STARTER_PROMPTS: Array<{
+  title: string;
+  prompt: string;
+  mode: ChatMode;
+}> = [
   {
     title: "Explain simply",
     prompt: "Explain how async/await works in JavaScript with a short example.",
+    mode: "chat",
   },
   {
     title: "Draft a message",
     prompt: "Help me write a polite follow-up email after a project meeting.",
+    mode: "chat",
   },
   {
-    title: "Summarize notes",
-    prompt: "Give me 5 practical tips to write cleaner, faster TypeScript code.",
+    title: "Generate an image",
+    prompt:
+      "A sunlit minimalist wooden desk with a laptop, warm ceramic coffee mug, and small indoor plant.",
+    mode: "image",
   },
   {
     title: "Brainstorm ideas",
     prompt: "Suggest 5 simple weekend project ideas I can build with React.",
+    mode: "chat",
   },
 ];
 
@@ -68,10 +86,41 @@ function CopyButton({ text }: { text: string }) {
   );
 }
 
+function GeneratedImageCard({
+  imageUrl,
+  altText,
+}: {
+  imageUrl: string;
+  altText: string;
+}) {
+  const [failed, setFailed] = useState(false);
+
+  if (failed) {
+    return (
+      <div className="flex h-48 w-full items-center justify-center rounded-xl border border-zinc-200 bg-zinc-100 px-4 text-center text-xs text-zinc-500">
+        Unable to display generated image.
+      </div>
+    );
+  }
+
+  return (
+    <div className="overflow-hidden rounded-xl border border-zinc-200 bg-zinc-100">
+      <img
+        src={imageUrl}
+        alt={altText}
+        referrerPolicy="no-referrer"
+        onError={() => setFailed(true)}
+        className="block max-h-[420px] w-full object-contain"
+      />
+    </div>
+  );
+}
+
 export function MessageList({
   conversationId,
   messages,
   isLoading,
+  loadingMode,
   error,
   onRetry,
   onDismissError,
@@ -134,8 +183,11 @@ export function MessageList({
               How can I help today?
             </h2>
             <p className="mt-2 text-sm leading-relaxed text-zinc-500">
-              Ask a question, draft text, or debug code. Conversations are saved
-              automatically in your browser.
+              Chat, ask follow-up questions, or switch to{" "}
+              <strong className="font-medium text-zinc-700">
+                Generate Image
+              </strong>{" "}
+              to create visuals.
             </p>
           </div>
 
@@ -144,11 +196,14 @@ export function MessageList({
               <button
                 key={item.title}
                 type="button"
-                onClick={() => onSelectPrompt(item.prompt)}
+                onClick={() => onSelectPrompt(item.prompt, item.mode)}
                 className="flex min-h-[48px] flex-col items-start justify-center rounded-xl border border-zinc-200 bg-white px-4 py-3 text-left transition-colors hover:border-zinc-300 hover:bg-zinc-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600"
               >
-                <span className="text-xs font-semibold text-zinc-900">
-                  {item.title}
+                <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-zinc-900">
+                  {item.mode === "image" && (
+                    <ImageIcon className="h-3.5 w-3.5 text-zinc-500" aria-hidden="true" />
+                  )}
+                  <span>{item.title}</span>
                 </span>
                 <span className="mt-0.5 line-clamp-2 text-xs leading-relaxed text-zinc-500">
                   {item.prompt}
@@ -164,11 +219,16 @@ export function MessageList({
   const lastMessage = messages[messages.length - 1];
   const showWaitingIndicator =
     isLoading &&
-    (!lastMessage || lastMessage.role === "user" || lastMessage.text === "");
+    (!lastMessage ||
+      lastMessage.role === "user" ||
+      (lastMessage.text === "" && !lastMessage.imageUrl));
 
   const lastModelIndex = (() => {
     for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i].role === "model" && messages[i].text.trim().length > 0) {
+      if (
+        messages[i].role === "model" &&
+        (messages[i].text.trim().length > 0 || Boolean(messages[i].imageUrl))
+      ) {
         return i;
       }
     }
@@ -192,14 +252,26 @@ export function MessageList({
                       {msg.text}
                     </p>
                   </div>
-                  <span className="mt-1.5 px-1 text-xs text-zinc-400 tabular-nums">
-                    {formatTimestamp(msg.createdAt)}
-                  </span>
+                  <div className="mt-1.5 flex items-center gap-1.5 px-1 text-xs text-zinc-400 tabular-nums">
+                    {msg.mode === "image" && (
+                      <>
+                        <span>Image prompt</span>
+                        {msg.imageAspectRatio && (
+                          <>
+                            <span aria-hidden="true">·</span>
+                            <span>{msg.imageAspectRatio}</span>
+                          </>
+                        )}
+                        <span aria-hidden="true">·</span>
+                      </>
+                    )}
+                    <span>{formatTimestamp(msg.createdAt)}</span>
+                  </div>
                 </div>
               );
             }
 
-            if (msg.text === "" && isLoading) {
+            if (msg.text === "" && !msg.imageUrl && isLoading) {
               return null;
             }
 
@@ -208,12 +280,33 @@ export function MessageList({
             return (
               <div key={msg.id} className="group flex min-w-0 flex-col items-start">
                 <div className="w-full min-w-0 max-w-full rounded-2xl border border-zinc-200 bg-white px-4 py-3.5 text-zinc-900 sm:px-5 sm:py-4">
-                  <MessageContent text={msg.text} />
+                  {msg.imageUrl && (
+                    <GeneratedImageCard
+                      imageUrl={msg.imageUrl}
+                      altText={msg.text || "Generated image"}
+                    />
+                  )}
+                  {msg.text && (
+                    <div className={msg.imageUrl ? "mt-3" : ""}>
+                      <MessageContent text={msg.text} />
+                    </div>
+                  )}
                 </div>
                 <div className="mt-1.5 flex flex-wrap items-center gap-1.5 px-1">
                   <span className="mr-1 text-xs text-zinc-400 tabular-nums">
                     {formatTimestamp(msg.createdAt)}
                   </span>
+                  {msg.imageUrl && !isLoading && (
+                    <a
+                      href={msg.imageUrl}
+                      download={`gemini-image-${msg.createdAt}.png`}
+                      className="inline-flex min-h-[32px] items-center gap-1 rounded px-2 py-1 text-xs text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600"
+                      aria-label="Download image"
+                    >
+                      <Download className="h-3.5 w-3.5" aria-hidden="true" />
+                      <span>Download</span>
+                    </a>
+                  )}
                   {msg.text && !isLoading && <CopyButton text={msg.text} />}
                   {isLatestModel && !isLoading && !error && (
                     <button
@@ -234,7 +327,11 @@ export function MessageList({
           {showWaitingIndicator && (
             <div role="status" aria-live="polite" className="flex items-start">
               <div className="inline-flex items-center gap-2 rounded-2xl border border-zinc-200 bg-white px-4 py-3.5 text-sm text-zinc-500">
-                <span>Generating response</span>
+                <span>
+                  {loadingMode === "image"
+                    ? "Generating image"
+                    : "Generating response"}
+                </span>
                 <span className="inline-flex items-center gap-1" aria-hidden="true">
                   <span className="h-1.5 w-1.5 rounded-full bg-zinc-400 animate-pulse motion-reduce:animate-none" />
                   <span className="h-1.5 w-1.5 rounded-full bg-zinc-400 animate-pulse [animation-delay:150ms] motion-reduce:animate-none" />

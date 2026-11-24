@@ -5,6 +5,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { OPTIONS as chatOptions, POST as chatPost } from "./api/chat.ts";
 import { GET as healthGet } from "./api/health.ts";
+import { OPTIONS as imageOptions, POST as imagePost } from "./api/image.ts";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -89,6 +90,40 @@ async function startServer() {
     });
 
     const webRes = await chatPost(webRequest);
+    await pipeWebResponse(webRes, res, () => aborted);
+  });
+
+  app.all("/api/image", async (req: ExpressRequest, res: ExpressResponse) => {
+    if (req.method === "OPTIONS") {
+      const webRes = await imageOptions();
+      await pipeWebResponse(webRes, res, () => false);
+      return;
+    }
+
+    if (req.method !== "POST") {
+      res.setHeader("Allow", "POST, OPTIONS");
+      res.status(405).json({ error: "Method not allowed. Use POST." });
+      return;
+    }
+
+    const abortController = new AbortController();
+    let aborted = false;
+
+    res.on("close", () => {
+      if (!res.writableEnded) {
+        aborted = true;
+        abortController.abort();
+      }
+    });
+
+    const webRequest = new Request(`http://localhost:${PORT}/api/image`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req.body ?? {}),
+      signal: abortController.signal,
+    });
+
+    const webRes = await imagePost(webRequest);
     await pipeWebResponse(webRes, res, () => aborted);
   });
 

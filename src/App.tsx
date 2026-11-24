@@ -3,7 +3,12 @@ import { ChatHeader } from "./components/ChatHeader";
 import { ChatInput } from "./components/ChatInput";
 import { MessageList } from "./components/MessageList";
 import { Sidebar } from "./components/Sidebar";
-import type { Conversation, Message } from "./types/chat";
+import type {
+  ChatMode,
+  Conversation,
+  ImageAspectRatio,
+  Message,
+} from "./types/chat";
 import {
   createConversation,
   deriveTitleFromMessage,
@@ -17,6 +22,13 @@ import {
 interface StreamChunkPayload {
   text?: string;
   done?: boolean;
+  error?: string;
+}
+
+interface ImageResponsePayload {
+  imageUrl?: string;
+  text?: string;
+  aspectRatio?: ImageAspectRatio;
   error?: string;
 }
 
@@ -44,7 +56,10 @@ export default function App() {
     conversations.find((c) => c.id === resolvedActiveId) ?? null;
 
   const [input, setInput] = useState("");
+  const [mode, setMode] = useState<ChatMode>("chat");
+  const [aspectRatio, setAspectRatio] = useState<ImageAspectRatio>("1:1");
   const [isLoading, setIsLoading] = useState(false);
+  const [loadingMode, setLoadingMode] = useState<ChatMode>("chat");
   const [error, setError] = useState<string | null>(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
 
@@ -131,6 +146,7 @@ export default function App() {
       const controller = new AbortController();
       abortControllerRef.current = controller;
       isSendingRef.current = true;
+      setLoadingMode("chat");
       setIsLoading(true);
       setError(null);
 
@@ -139,6 +155,7 @@ export default function App() {
         id: assistantMessageId,
         role: "model",
         text: "",
+        mode: "chat",
         createdAt: Date.now(),
       };
 
@@ -155,6 +172,20 @@ export default function App() {
       );
 
       let receivedAnyText = false;
+      let clientTimedOut = false;
+      let watchdogTimer: number | undefined;
+
+      const resetWatchdog = () => {
+        if (watchdogTimer !== undefined) {
+          window.clearTimeout(watchdogTimer);
+        }
+        watchdogTimer = window.setTimeout(() => {
+          clientTimedOut = true;
+          controller.abort();
+        }, 32000);
+      };
+
+      resetWatchdog();
 
       try {
         const response = await fetch("/api/chat", {
@@ -162,10 +193,14 @@ export default function App() {
           headers: { "Content-Type": "application/json" },
           signal: controller.signal,
           body: JSON.stringify({
-            messages: historyForApi.map((m) => ({
-              role: m.role,
-              text: m.text,
-            })),
+            messages: historyForApi
+              .filter(
+                (m) => m.text.trim().length > 0 && m.mode !== "image"
+              )
+              .map((m) => ({
+                role: m.role,
+                text: m.text,
+              })),
           }),
         });
 
@@ -229,6 +264,7 @@ export default function App() {
         };
 
         while (true) {
+          resetWatchdog();
           const { done, value } = await reader.read();
           if (done) break;
 
@@ -264,6 +300,9 @@ export default function App() {
               )
             );
           }
+          if (clientTimedOut) {
+            setError("Connection timed out while waiting for Gemini. Please try again.");
+          }
           return;
         }
 
@@ -288,6 +327,107 @@ export default function App() {
             : "Unable to reach Gemini. Please try again.";
         setError(message);
       } finally {
+        if (watchdogTimer !== undefined) {
+          window.clearTimeout(watchdogTimer);
+        }
+        if (abortControllerRef.current === controller) {
+          abortControllerRef.current = null;
+          isSendingRef.current = false;
+          setIsLoading(false);
+        }
+      }
+    },
+    [abortActiveRequest]
+  );
+
+  const generateImageReply = useCallback(
+    async (
+      conversationId: string,
+      promptText: string,
+      ratio: ImageAspectRatio
+    ) => {
+      abortActiveRequest();
+
+      const controller = new AbortController();
+      abortControllerRef.current = controller;
+      isSendingRef.current = true;
+      setLoadingMode("image");
+      setIsLoading(true);
+      setError(null);
+
+      let clientTimedOut = false;
+      const timeoutTimer = window.setTimeout(() => {
+        clientTimedOut = true;
+        controller.abort();
+      }, 28000);
+
+      try {
+        const response = await fetch("/api/image", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          signal: controller.signal,
+          body: JSON.stringify({
+            prompt: promptText,
+            aspectRatio: ratio,
+          }),
+        });
+
+        let payload: ImageResponsePayload = {};
+        try {
+          payload = (await response.json()) as ImageResponsePayload;
+        } catch {
+          // Non-JSON error response
+        }
+
+        if (!response.ok) {
+          const fallbackMsg =
+            response.status === 404
+              ? "Image generation service is unavailable (404)."
+              : `Image generation failed (${response.status}).`;
+          throw new Error(payload.error || fallbackMsg);
+        }
+
+        if (!payload.imageUrl) {
+          throw new Error(
+            payload.error || "No image was returned. Please try again."
+          );
+        }
+
+        const imageMessage: Message = {
+          id: generateId(),
+          role: "model",
+          mode: "image",
+          text: payload.text ?? "",
+          imageUrl: payload.imageUrl,
+          imageAspectRatio: payload.aspectRatio ?? ratio,
+          createdAt: Date.now(),
+        };
+
+        setConversations((prev) =>
+          prev.map((conv) =>
+            conv.id === conversationId
+              ? {
+                  ...conv,
+                  messages: [...conv.messages, imageMessage],
+                  updatedAt: Date.now(),
+                }
+              : conv
+          )
+        );
+      } catch (err) {
+        if (err instanceof DOMException && err.name === "AbortError") {
+          if (clientTimedOut) {
+            setError("Image generation timed out. Please try again.");
+          }
+          return;
+        }
+        const message =
+          err instanceof Error
+            ? err.message
+            : "Failed to generate image. Please try again.";
+        setError(message);
+      } finally {
+        window.clearTimeout(timeoutTimer);
         if (abortControllerRef.current === controller) {
           abortControllerRef.current = null;
           isSendingRef.current = false;
@@ -299,15 +439,22 @@ export default function App() {
   );
 
   const sendPrompt = useCallback(
-    (rawText: string) => {
+    (rawText: string, overrideMode?: ChatMode) => {
       const trimmed = rawText.trim();
       if (!trimmed || isLoading || isSendingRef.current) return;
       isSendingRef.current = true;
+
+      const targetMode = overrideMode ?? mode;
+      if (overrideMode && overrideMode !== mode) {
+        setMode(overrideMode);
+      }
 
       const userMessage: Message = {
         id: generateId(),
         role: "user",
         text: trimmed,
+        mode: targetMode,
+        imageAspectRatio: targetMode === "image" ? aspectRatio : undefined,
         createdAt: Date.now(),
       };
 
@@ -346,9 +493,21 @@ export default function App() {
         });
       }
 
-      void streamGeminiReply(targetId, nextMessages);
+      if (targetMode === "image") {
+        void generateImageReply(targetId, trimmed, aspectRatio);
+      } else {
+        void streamGeminiReply(targetId, nextMessages);
+      }
     },
-    [activeConversation, isLoading, resolvedActiveId, streamGeminiReply]
+    [
+      activeConversation,
+      aspectRatio,
+      generateImageReply,
+      isLoading,
+      mode,
+      resolvedActiveId,
+      streamGeminiReply,
+    ]
   );
 
   const handleSend = useCallback(() => {
@@ -374,6 +533,7 @@ export default function App() {
 
     const cutoff = msgs.length - lastUserIndex;
     const historyUpToUser = msgs.slice(0, cutoff);
+    const lastUserMsg = historyUpToUser[historyUpToUser.length - 1];
 
     if (historyUpToUser.length !== msgs.length) {
       setConversations((prev) =>
@@ -385,8 +545,22 @@ export default function App() {
       );
     }
 
-    void streamGeminiReply(activeConversation.id, historyUpToUser);
-  }, [activeConversation, isLoading, streamGeminiReply]);
+    if (lastUserMsg.mode === "image") {
+      void generateImageReply(
+        activeConversation.id,
+        lastUserMsg.text,
+        lastUserMsg.imageAspectRatio ?? aspectRatio
+      );
+    } else {
+      void streamGeminiReply(activeConversation.id, historyUpToUser);
+    }
+  }, [
+    activeConversation,
+    aspectRatio,
+    generateImageReply,
+    isLoading,
+    streamGeminiReply,
+  ]);
 
   return (
     <div className="flex h-dvh w-full max-w-full overflow-hidden bg-zinc-50 text-zinc-900">
@@ -413,6 +587,7 @@ export default function App() {
           conversationId={resolvedActiveId}
           messages={activeConversation?.messages ?? []}
           isLoading={isLoading}
+          loadingMode={loadingMode}
           error={error}
           onRetry={handleRetry}
           onDismissError={() => setError(null)}
@@ -421,7 +596,11 @@ export default function App() {
 
         <ChatInput
           value={input}
+          mode={mode}
+          aspectRatio={aspectRatio}
           onChange={setInput}
+          onModeChange={setMode}
+          onAspectRatioChange={setAspectRatio}
           onSend={handleSend}
           onStop={abortActiveRequest}
           isLoading={isLoading}

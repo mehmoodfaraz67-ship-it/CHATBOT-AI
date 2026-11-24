@@ -2,8 +2,8 @@ import { GoogleGenAI, ThinkingLevel } from "@google/genai";
 
 export const maxDuration = 30;
 
-const PRIMARY_MODEL = "gemini-3.1-flash-lite";
-const FALLBACK_MODEL = "gemini-4-hydrogen";
+const PRIMARY_MODEL = "gemini-4-hydrogen";
+const FALLBACK_MODEL = "gemini-3.1-flash-lite";
 const MAX_CONTEXT_MESSAGES = 16;
 
 interface ChatMessageInput {
@@ -64,15 +64,17 @@ function parseGeminiError(err: unknown): {
   status: number;
   message: string;
   shouldFallback: boolean;
+  isRateLimit?: boolean;
 } {
   const rawMessage =
     err instanceof Error ? err.message : "An unexpected error occurred.";
   const readable = extractReadableErrorMessage(rawMessage);
+  const lower = rawMessage.toLowerCase();
 
   if (
     rawMessage.includes("API_KEY_INVALID") ||
     rawMessage.includes("PERMISSION_DENIED") ||
-    rawMessage.toLowerCase().includes("gemini api key is not configured")
+    lower.includes("gemini api key is not configured")
   ) {
     return {
       status: 403,
@@ -87,7 +89,8 @@ function parseGeminiError(err: unknown): {
       status: 429,
       message:
         "Rate limit or quota exceeded. Please wait a moment and try again.",
-      shouldFallback: false,
+      shouldFallback: true,
+      isRateLimit: true,
     };
   }
 
@@ -115,17 +118,27 @@ function parseGeminiError(err: unknown): {
     };
   }
 
+  if (rawMessage.includes("INVALID_ARGUMENT")) {
+    return {
+      status: 400,
+      message: readable || "Invalid request sent to Gemini.",
+      shouldFallback: false,
+    };
+  }
+
   return {
     status: 500,
     message: readable || "Failed to generate a response from Gemini.",
     shouldFallback:
-      rawMessage.includes("500") || rawMessage.includes("INTERNAL"),
+      rawMessage.includes("500") ||
+      rawMessage.includes("INTERNAL") ||
+      lower.includes("empty response"),
   };
 }
 
 function sanitizeMessages(rawMessages: unknown): ChatMessageInput[] {
   if (!Array.isArray(rawMessages)) return [];
-  return rawMessages
+  const filtered = rawMessages
     .filter((item): item is ChatMessageInput => {
       if (!item || typeof item !== "object") return false;
       const candidate = item as Record<string, unknown>;
@@ -139,6 +152,17 @@ function sanitizeMessages(rawMessages: unknown): ChatMessageInput[] {
       role: item.role,
       text: item.text.trim(),
     }));
+
+  const merged: ChatMessageInput[] = [];
+  for (const msg of filtered) {
+    const prev = merged[merged.length - 1];
+    if (prev && prev.role === msg.role) {
+      prev.text = `${prev.text}\n\n${msg.text}`;
+    } else {
+      merged.push({ ...msg });
+    }
+  }
+  return merged;
 }
 
 function jsonResponse(status: number, payload: unknown): Response {
@@ -199,24 +223,29 @@ export async function POST(request: Request): Promise<Response> {
   }));
 
   const systemInstruction =
-    "You are a fast, helpful, and concise AI assistant. Give direct, clear answers without unnecessary filler.";
+    "You are a fast, helpful, and concise AI assistant. Give direct, clear answers without unnecessary filler. If the user asks to generate or create an image while in text chat mode, briefly let them know they can switch to the Generate Image button below the input box.";
 
   const attempts = [
     {
       model: PRIMARY_MODEL,
-      thinkingLevel: ThinkingLevel.MINIMAL,
-      firstTokenTimeoutMs: 8500,
+      thinkingLevel: ThinkingLevel.LOW as ThinkingLevel | null,
+      firstTokenTimeoutMs: 5500,
+      delayBeforeMs: 0,
+      nonStream: false,
     },
     {
       model: FALLBACK_MODEL,
-      thinkingLevel: ThinkingLevel.LOW,
-      firstTokenTimeoutMs: 8500,
+      thinkingLevel: null as ThinkingLevel | null,
+      firstTokenTimeoutMs: 7000,
+      delayBeforeMs: 0,
+      nonStream: true,
     },
     {
-      model: PRIMARY_MODEL,
-      thinkingLevel: ThinkingLevel.MINIMAL,
+      model: FALLBACK_MODEL,
+      thinkingLevel: null as ThinkingLevel | null,
       firstTokenTimeoutMs: 7000,
-      onlyAfterFastError: true,
+      delayBeforeMs: 200,
+      nonStream: true,
     },
   ];
 
@@ -241,19 +270,23 @@ export async function POST(request: Request): Promise<Response> {
 
       try {
         let lastError: unknown = null;
+        let lastErrorWasRateLimit = false;
         let completed = false;
-        let anyTimedOut = false;
+        let lastAttemptTimedOut = false;
+        const rateLimitedModels = new Set<string>();
 
         for (let i = 0; i < attempts.length; i++) {
           if (request.signal.aborted) break;
 
           const attempt = attempts[i];
-          if (attempt.onlyAfterFastError && anyTimedOut) {
-            break;
+          if (rateLimitedModels.has(attempt.model)) {
+            continue;
           }
 
-          if (i === 2) {
-            await new Promise((resolve) => setTimeout(resolve, 250));
+          if (attempt.delayBeforeMs > 0 && i > 0 && !lastAttemptTimedOut) {
+            await new Promise((resolve) =>
+              setTimeout(resolve, attempt.delayBeforeMs)
+            );
             if (request.signal.aborted) break;
           }
 
@@ -267,14 +300,36 @@ export async function POST(request: Request): Promise<Response> {
           }, attempt.firstTokenTimeoutMs);
 
           try {
+            const cfg: Record<string, unknown> = {
+              abortSignal: attemptController.signal,
+              systemInstruction,
+            };
+            if (attempt.thinkingLevel) {
+              cfg.thinkingConfig = { thinkingLevel: attempt.thinkingLevel };
+            }
+
+            if (attempt.nonStream) {
+              const res = await ai.models.generateContent({
+                model: attempt.model,
+                contents,
+                config: cfg,
+              });
+              clearTimeout(timer);
+              const fullText = res.text ?? "";
+              if (!fullText) {
+                throw new Error("Model returned an empty response.");
+              }
+              if (request.signal.aborted) break;
+              enqueueSse({ text: fullText });
+              enqueueSse({ done: true });
+              completed = true;
+              break;
+            }
+
             const geminiStream = await ai.models.generateContentStream({
               model: attempt.model,
               contents,
-              config: {
-                abortSignal: attemptController.signal,
-                thinkingConfig: { thinkingLevel: attempt.thinkingLevel },
-                systemInstruction,
-              },
+              config: cfg,
             });
 
             const iterator = geminiStream[Symbol.asyncIterator]();
@@ -321,18 +376,29 @@ export async function POST(request: Request): Promise<Response> {
             if (request.signal.aborted) break;
 
             if (timedOut) {
-              anyTimedOut = true;
+              lastAttemptTimedOut = true;
               lastError = new Error(
                 "Gemini took too long to respond. Please try again."
               );
+              lastErrorWasRateLimit = false;
               if (i < attempts.length - 1) continue;
               throw lastError;
             }
 
-            lastError = err;
+            lastAttemptTimedOut = false;
             const parsed = parseGeminiError(err);
+            if (parsed.isRateLimit) {
+              rateLimitedModels.add(attempt.model);
+            }
+
+            // Do not overwrite an earlier transient/timeout error with a fallback 429
+            if (!lastError || !parsed.isRateLimit || lastErrorWasRateLimit) {
+              lastError = err;
+              lastErrorWasRateLimit = Boolean(parsed.isRateLimit);
+            }
+
             if (!parsed.shouldFallback || i === attempts.length - 1) {
-              throw err;
+              throw lastError;
             }
           } finally {
             if (activeAbortController === attemptController) {
