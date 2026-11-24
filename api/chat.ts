@@ -4,7 +4,7 @@ export const maxDuration = 30;
 
 const PRIMARY_MODEL = "gemini-3.1-flash-lite";
 const FALLBACK_MODEL = "gemini-4-hydrogen";
-const MAX_CONTEXT_MESSAGES = 12;
+const MAX_CONTEXT_MESSAGES = 16;
 
 interface ChatMessageInput {
   role: "user" | "model";

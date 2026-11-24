@@ -1,10 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent } from "react";
 import {
   Check,
   MessageSquare,
   Pencil,
   Plus,
+  Search,
   Trash2,
   X,
 } from "lucide-react";
@@ -35,6 +36,7 @@ export function Sidebar({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draftTitle, setDraftTitle] = useState("");
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
   const editInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -43,6 +45,26 @@ export function Sidebar({
       editInputRef.current.select();
     }
   }, [editingId]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleGlobalKeyDown = (e: globalThis.KeyboardEvent) => {
+      if (e.key === "Escape" && !editingId) {
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", handleGlobalKeyDown);
+    return () => window.removeEventListener("keydown", handleGlobalKeyDown);
+  }, [editingId, isOpen, onClose]);
+
+  const filteredConversations = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return conversations;
+    return conversations.filter((conv) => {
+      if (conv.title.toLowerCase().includes(q)) return true;
+      return conv.messages.some((m) => m.text.toLowerCase().includes(q));
+    });
+  }, [conversations, searchQuery]);
 
   const startEditing = (conv: Conversation) => {
     setConfirmDeleteId(null);
@@ -89,38 +111,65 @@ export function Sidebar({
 
       <aside
         aria-label="Conversations"
-        className={`fixed inset-y-0 left-0 z-40 flex w-[min(18rem,85vw)] shrink-0 flex-col border-r border-zinc-200 bg-zinc-50 transition-transform duration-150 ease-out lg:static lg:w-72 lg:translate-x-0 ${
+        className={`fixed inset-y-0 left-0 z-40 flex w-[min(18.5rem,85vw)] shrink-0 flex-col border-r border-zinc-200 bg-zinc-50 transition-transform duration-150 ease-out lg:static lg:w-72 lg:translate-x-0 ${
           isOpen
             ? "visible translate-x-0 pointer-events-auto"
             : "invisible -translate-x-full pointer-events-none lg:visible lg:pointer-events-auto"
         }`}
       >
-        <div className="flex h-14 items-center justify-between border-b border-zinc-200 px-4">
+        <div className="flex h-13 items-center justify-between border-b border-zinc-200 px-4 sm:h-14">
           <span className="text-base font-semibold tracking-tight text-zinc-950 whitespace-nowrap shrink-0">
             Gemini Chat
           </span>
           <button
             type="button"
             onClick={onClose}
-            className="inline-flex h-10 w-10 items-center justify-center rounded-lg text-zinc-600 transition-colors hover:bg-zinc-200/70 hover:text-zinc-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 lg:hidden"
+            className="inline-flex h-11 w-11 items-center justify-center rounded-lg text-zinc-600 transition-colors hover:bg-zinc-200/70 hover:text-zinc-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 lg:hidden"
             aria-label="Close sidebar"
           >
             <X className="h-5 w-5" aria-hidden="true" />
           </button>
         </div>
 
-        <div className="p-3">
+        <div className="space-y-2 p-3">
           <button
             type="button"
             onClick={() => {
               onCreate();
               onClose();
             }}
-            className="flex h-10 w-full items-center justify-center gap-2 rounded-lg bg-zinc-900 px-4 text-sm font-medium text-white transition-colors hover:bg-zinc-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 focus-visible:ring-offset-2 whitespace-nowrap"
+            className="flex h-11 w-full items-center justify-center gap-2 rounded-lg bg-zinc-900 px-4 text-sm font-medium text-white transition-colors hover:bg-zinc-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 focus-visible:ring-offset-2 whitespace-nowrap sm:h-10"
           >
             <Plus className="h-4 w-4 shrink-0" aria-hidden="true" />
             <span>New Chat</span>
           </button>
+
+          {conversations.length > 0 && (
+            <div className="relative flex items-center">
+              <Search
+                className="pointer-events-none absolute left-2.5 h-4 w-4 text-zinc-400"
+                aria-hidden="true"
+              />
+              <input
+                type="search"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Search chats..."
+                aria-label="Search conversations"
+                className="h-10 w-full rounded-lg border border-zinc-200 bg-white pr-8 pl-8 text-base text-zinc-900 placeholder:text-zinc-400 focus:border-zinc-400 focus:outline-none sm:h-9 sm:text-sm"
+              />
+              {searchQuery && (
+                <button
+                  type="button"
+                  onClick={() => setSearchQuery("")}
+                  className="absolute right-1 inline-flex h-8 w-8 items-center justify-center rounded text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600"
+                  aria-label="Clear search"
+                >
+                  <X className="h-3.5 w-3.5" aria-hidden="true" />
+                </button>
+              )}
+            </div>
+          )}
         </div>
 
         <nav className="flex-1 overflow-y-auto px-2 pb-3" aria-label="Chat history">
@@ -133,9 +182,22 @@ export function Sidebar({
                 Start a new chat to begin.
               </p>
             </div>
+          ) : filteredConversations.length === 0 ? (
+            <div className="px-3 py-8 text-center">
+              <p className="text-sm font-medium text-zinc-700">
+                No matching chats
+              </p>
+              <button
+                type="button"
+                onClick={() => setSearchQuery("")}
+                className="mt-2 text-xs font-medium text-blue-600 hover:text-blue-700 focus-visible:outline-none focus-visible:underline"
+              >
+                Clear search
+              </button>
+            </div>
           ) : (
             <ul className="space-y-1">
-              {conversations.map((conv) => {
+              {filteredConversations.map((conv) => {
                 const isActive = conv.id === activeId;
                 const isEditing = editingId === conv.id;
                 const isConfirmingDelete = confirmDeleteId === conv.id;
@@ -143,7 +205,7 @@ export function Sidebar({
                 return (
                   <li key={conv.id}>
                     <div
-                      className={`group relative flex items-center gap-1 rounded-lg px-2.5 py-2 transition-colors ${
+                      className={`group relative flex min-h-[44px] items-center gap-1 rounded-lg px-2.5 py-2 transition-colors ${
                         isActive
                           ? "bg-white text-zinc-950 shadow-xs ring-1 ring-zinc-200"
                           : "text-zinc-700 hover:bg-zinc-200/60 hover:text-zinc-950"
@@ -159,12 +221,12 @@ export function Sidebar({
                             onKeyDown={(e) => handleEditKeyDown(e, conv.id)}
                             maxLength={80}
                             aria-label="Conversation title"
-                            className="h-9 min-w-0 flex-1 rounded border border-zinc-300 bg-white px-2 text-base text-zinc-950 focus:border-blue-600 focus:outline-none sm:h-8 sm:text-sm"
+                            className="h-10 min-w-0 flex-1 rounded border border-zinc-300 bg-white px-2 text-base text-zinc-950 focus:border-blue-600 focus:outline-none sm:h-8 sm:text-sm"
                           />
                           <button
                             type="button"
                             onClick={() => commitRename(conv.id)}
-                            className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded text-zinc-700 hover:bg-zinc-200 hover:text-zinc-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 sm:h-8 sm:w-8"
+                            className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded text-zinc-700 hover:bg-zinc-200 hover:text-zinc-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 sm:h-8 sm:w-8"
                             aria-label="Save title"
                           >
                             <Check className="h-4 w-4" aria-hidden="true" />
@@ -172,7 +234,7 @@ export function Sidebar({
                           <button
                             type="button"
                             onClick={cancelEditing}
-                            className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 sm:h-8 sm:w-8"
+                            className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 sm:h-8 sm:w-8"
                             aria-label="Cancel rename"
                           >
                             <X className="h-4 w-4" aria-hidden="true" />
@@ -190,14 +252,14 @@ export function Sidebar({
                                 onDelete(conv.id);
                                 setConfirmDeleteId(null);
                               }}
-                              className="rounded bg-red-600 px-2.5 py-1 text-xs font-medium text-white transition-colors hover:bg-red-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-600 whitespace-nowrap"
+                              className="min-h-[32px] rounded bg-red-600 px-2.5 py-1 text-xs font-medium text-white transition-colors hover:bg-red-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-600 whitespace-nowrap"
                             >
                               Delete
                             </button>
                             <button
                               type="button"
                               onClick={() => setConfirmDeleteId(null)}
-                              className="rounded px-2 py-1 text-xs font-medium text-zinc-600 transition-colors hover:bg-zinc-200 hover:text-zinc-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 whitespace-nowrap"
+                              className="min-h-[32px] rounded px-2 py-1 text-xs font-medium text-zinc-600 transition-colors hover:bg-zinc-200 hover:text-zinc-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 whitespace-nowrap"
                             >
                               Cancel
                             </button>
@@ -245,7 +307,7 @@ export function Sidebar({
                             <button
                               type="button"
                               onClick={() => startEditing(conv)}
-                              className="inline-flex h-9 w-9 items-center justify-center rounded-md text-zinc-500 transition-colors hover:bg-zinc-200/80 hover:text-zinc-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 sm:h-8 sm:w-8"
+                              className="inline-flex h-10 w-10 items-center justify-center rounded-md text-zinc-500 transition-colors hover:bg-zinc-200/80 hover:text-zinc-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 sm:h-8 sm:w-8"
                               aria-label={`Rename ${conv.title}`}
                               title="Rename conversation"
                             >
@@ -254,7 +316,7 @@ export function Sidebar({
                             <button
                               type="button"
                               onClick={() => setConfirmDeleteId(conv.id)}
-                              className="inline-flex h-9 w-9 items-center justify-center rounded-md text-zinc-500 transition-colors hover:bg-red-50 hover:text-red-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-600 sm:h-8 sm:w-8"
+                              className="inline-flex h-10 w-10 items-center justify-center rounded-md text-zinc-500 transition-colors hover:bg-red-50 hover:text-red-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-600 sm:h-8 sm:w-8"
                               aria-label={`Delete ${conv.title}`}
                               title="Delete conversation"
                             >

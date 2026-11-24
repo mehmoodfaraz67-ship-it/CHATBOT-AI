@@ -6,10 +6,40 @@ interface MessageContentProps {
   text: string;
 }
 
+function isSafeHttpUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
 function renderInlineFormatting(line: string, keyPrefix: string): ReactNode[] {
-  const tokens = line.split(/(`[^`]+`|\*\*[^*]+\*\*)/g);
+  const tokens = line.split(/(\[[^\]]+\]\([^)]+\)|`[^`]+`|\*\*[^*]+\*\*)/g);
   return tokens.map((token, idx) => {
     const key = `${keyPrefix}-${idx}`;
+    if (token.startsWith("[") && token.endsWith(")")) {
+      const linkMatch = token.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
+      if (linkMatch) {
+        const label = linkMatch[1];
+        const href = linkMatch[2].trim();
+        if (isSafeHttpUrl(href)) {
+          return (
+            <a
+              key={key}
+              href={href}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="font-medium text-blue-700 underline underline-offset-2 hover:text-blue-800"
+            >
+              {label}
+            </a>
+          );
+        }
+        return <span key={key}>{label}</span>;
+      }
+    }
     if (token.startsWith("`") && token.endsWith("`") && token.length >= 2) {
       return (
         <code
@@ -51,7 +81,7 @@ function CodeBlock({ code, language }: { code: string; language: string }) {
         <button
           type="button"
           onClick={handleCopy}
-          className="inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-zinc-300 transition-colors hover:bg-zinc-800 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+          className="inline-flex min-h-[32px] shrink-0 items-center gap-1 rounded px-2 py-1 text-zinc-300 transition-colors hover:bg-zinc-800 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
           aria-label="Copy code block"
         >
           {copied ? (
@@ -119,6 +149,19 @@ function TextSegment({ text, keyPrefix }: { text: string; keyPrefix: string }) {
     }
 
     flushList(idx);
+
+    const quoteMatch = line.match(/^>\s?(.*)$/);
+    if (quoteMatch) {
+      elements.push(
+        <blockquote
+          key={`${keyPrefix}-q-${idx}`}
+          className="my-1.5 rounded-lg border border-zinc-200 bg-zinc-50 px-3.5 py-2 text-sm leading-relaxed text-zinc-700"
+        >
+          {renderInlineFormatting(quoteMatch[1], `${keyPrefix}-q-${idx}`)}
+        </blockquote>
+      );
+      return;
+    }
 
     const headingMatch = line.match(/^(#{1,3})\s+(.*)$/);
     if (headingMatch) {

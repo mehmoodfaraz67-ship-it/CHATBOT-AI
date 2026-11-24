@@ -298,61 +298,62 @@ export default function App() {
     [abortActiveRequest]
   );
 
+  const sendPrompt = useCallback(
+    (rawText: string) => {
+      const trimmed = rawText.trim();
+      if (!trimmed || isLoading || isSendingRef.current) return;
+      isSendingRef.current = true;
+
+      const userMessage: Message = {
+        id: generateId(),
+        role: "user",
+        text: trimmed,
+        createdAt: Date.now(),
+      };
+
+      setInput("");
+
+      let targetId = resolvedActiveId;
+      let nextMessages: Message[] = [];
+
+      if (!targetId || !activeConversation) {
+        const created = createConversation(deriveTitleFromMessage(trimmed));
+        created.messages = [userMessage];
+        targetId = created.id;
+        nextMessages = created.messages;
+        setConversations((prev) => [created, ...prev]);
+        setActiveId(created.id);
+      } else {
+        const shouldAutoTitle =
+          activeConversation.messages.length === 0 &&
+          activeConversation.title === "New Chat";
+        nextMessages = [...activeConversation.messages, userMessage];
+
+        setConversations((prev) => {
+          const updated = prev.map((conv) =>
+            conv.id === targetId
+              ? {
+                  ...conv,
+                  title: shouldAutoTitle
+                    ? deriveTitleFromMessage(trimmed)
+                    : conv.title,
+                  messages: nextMessages,
+                  updatedAt: Date.now(),
+                }
+              : conv
+          );
+          return [...updated].sort((a, b) => b.updatedAt - a.updatedAt);
+        });
+      }
+
+      void streamGeminiReply(targetId, nextMessages);
+    },
+    [activeConversation, isLoading, resolvedActiveId, streamGeminiReply]
+  );
+
   const handleSend = useCallback(() => {
-    const trimmed = input.trim();
-    if (!trimmed || isLoading || isSendingRef.current) return;
-    isSendingRef.current = true;
-
-    const userMessage: Message = {
-      id: generateId(),
-      role: "user",
-      text: trimmed,
-      createdAt: Date.now(),
-    };
-
-    setInput("");
-
-    let targetId = resolvedActiveId;
-    let nextMessages: Message[] = [];
-
-    if (!targetId || !activeConversation) {
-      const created = createConversation(deriveTitleFromMessage(trimmed));
-      created.messages = [userMessage];
-      targetId = created.id;
-      nextMessages = created.messages;
-      setConversations((prev) => [created, ...prev]);
-      setActiveId(created.id);
-    } else {
-      const shouldAutoTitle =
-        activeConversation.messages.length === 0 &&
-        activeConversation.title === "New Chat";
-      nextMessages = [...activeConversation.messages, userMessage];
-
-      setConversations((prev) => {
-        const updated = prev.map((conv) =>
-          conv.id === targetId
-            ? {
-                ...conv,
-                title: shouldAutoTitle
-                  ? deriveTitleFromMessage(trimmed)
-                  : conv.title,
-                messages: nextMessages,
-                updatedAt: Date.now(),
-              }
-            : conv
-        );
-        return [...updated].sort((a, b) => b.updatedAt - a.updatedAt);
-      });
-    }
-
-    void streamGeminiReply(targetId, nextMessages);
-  }, [
-    activeConversation,
-    input,
-    isLoading,
-    resolvedActiveId,
-    streamGeminiReply,
-  ]);
+    sendPrompt(input);
+  }, [input, sendPrompt]);
 
   const handleRetry = useCallback(() => {
     if (!activeConversation || isLoading || isSendingRef.current) return;
@@ -409,11 +410,13 @@ export default function App() {
         />
 
         <MessageList
+          conversationId={resolvedActiveId}
           messages={activeConversation?.messages ?? []}
           isLoading={isLoading}
           error={error}
           onRetry={handleRetry}
           onDismissError={() => setError(null)}
+          onSelectPrompt={sendPrompt}
         />
 
         <ChatInput
